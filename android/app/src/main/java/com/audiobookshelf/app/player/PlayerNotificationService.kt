@@ -460,6 +460,49 @@ class PlayerNotificationService : MediaBrowserServiceCompat() {
           playWhenReady: Boolean,
           playbackRate: Float?
   ) {
+    if (!playbackSession.isLocal || !DeviceManager.checkConnectivity(ctx)) {
+      preparePlayerWithCurrentProgress(playbackSession, playWhenReady, playbackRate)
+      return
+    }
+
+    val libraryItemId = playbackSession.libraryItemId
+    val serverConnectionConfig =
+            DeviceManager.getServerConnectionConfig(playbackSession.serverConnectionConfigId)
+    if (libraryItemId.isNullOrEmpty() || serverConnectionConfig == null) {
+      preparePlayerWithCurrentProgress(playbackSession, playWhenReady, playbackRate)
+      return
+    }
+
+    apiHandler.getMediaProgress(
+            libraryItemId,
+            playbackSession.episodeId,
+            serverConnectionConfig
+    ) { serverProgress ->
+      if (serverProgress != null && serverProgress.lastUpdate > playbackSession.updatedAt) {
+        Log.d(
+                tag,
+                "preparePlayer: Updating local progress from ${playbackSession.currentTime} to ${serverProgress.currentTime}"
+        )
+        playbackSession.currentTime = serverProgress.currentTime
+        playbackSession.updatedAt = serverProgress.lastUpdate
+
+        DeviceManager.dbManager.getLocalMediaProgress(playbackSession.localMediaProgressId)?.let {
+          it.updateFromServerMediaProgress(serverProgress)
+          DeviceManager.dbManager.saveLocalMediaProgress(it)
+        }
+      }
+
+      Handler(Looper.getMainLooper()).post {
+        preparePlayerWithCurrentProgress(playbackSession, playWhenReady, playbackRate)
+      }
+    }
+  }
+
+  private fun preparePlayerWithCurrentProgress(
+          playbackSession: PlaybackSession,
+          playWhenReady: Boolean,
+          playbackRate: Float?
+  ) {
     if (!isStarted) {
       Log.i(tag, "preparePlayer: foreground service not started - Starting service --")
       Intent(ctx, PlayerNotificationService::class.java).also { intent ->
