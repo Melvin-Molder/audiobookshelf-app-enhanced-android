@@ -139,6 +139,8 @@ class PlayerNotificationService : MediaBrowserServiceCompat() {
   // These are used to trigger reloading if
   private var forceReloadingAndroidAuto: Boolean = false
   private var firstLoadDone: Boolean = false
+  private var hasAttemptedLastPlaybackRestore: Boolean = false
+  private var suppressNextAndroidAutoPlay: Boolean = false
 
   fun isBrowseTreeInitialized(): Boolean {
     return this::browseTree.isInitialized
@@ -536,6 +538,9 @@ class PlayerNotificationService : MediaBrowserServiceCompat() {
     }
 
     currentPlaybackSession = playbackSession
+    if (playWhenReady) {
+      suppressNextAndroidAutoPlay = false
+    }
     grantCoverUriPermissions(playbackSession.getCoverUri(ctx))
     DeviceManager.setLastPlaybackSession(
             playbackSession
@@ -659,6 +664,53 @@ class PlayerNotificationService : MediaBrowserServiceCompat() {
         ctx.grantUriPermission(packageName, coverUri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
       } catch (error: Exception) {
         Log.w(tag, "Could not grant cover URI permission to $packageName: $error")
+      }
+    }
+  }
+
+  private fun prepareLastPlayedAudiobook() {
+    if (hasAttemptedLastPlaybackRestore || currentPlaybackSession != null) return
+    hasAttemptedLastPlaybackRestore = true
+
+    val lastSession = DeviceManager.deviceData.lastPlaybackSession ?: return
+    if (lastSession.mediaType != "book") return
+
+    val localLibraryItem =
+            lastSession.localLibraryItemId.takeIf { it.isNotEmpty() }?.let {
+              DeviceManager.dbManager.getLocalLibraryItem(it)
+            }
+                    ?: lastSession.libraryItemId?.let {
+                      DeviceManager.dbManager.getLocalLibraryItemByLId(it)
+                    }
+    val playbackRate = mediaManager.getSavedPlaybackRate()
+
+    if (localLibraryItem != null && localLibraryItem.hasTracks(ctx, null)) {
+      val playbackSession = localLibraryItem.getPlaybackSession(null, getDeviceInfo())
+      Handler(Looper.getMainLooper()).post {
+        if (currentPlaybackSession == null) {
+          preparePlayer(playbackSession, false, playbackRate)
+        }
+      }
+      return
+    }
+
+    val libraryItemId = lastSession.libraryItemId ?: return
+    if (!DeviceManager.checkConnectivity(ctx) ||
+                    DeviceManager.serverConnectionConfigId != lastSession.serverConnectionConfigId
+    ) {
+      return
+    }
+
+    apiHandler.playLibraryItem(
+            libraryItemId,
+            lastSession.episodeId,
+            getPlayItemRequestPayload(false)
+    ) { playbackSession ->
+      if (playbackSession == null) return@playLibraryItem
+      Handler(Looper.getMainLooper()).post {
+        if (currentPlaybackSession == null) {
+          preparePlayer(playbackSession, false, playbackRate)
+        }
       }
     }
   }
@@ -1073,6 +1125,21 @@ class PlayerNotificationService : MediaBrowserServiceCompat() {
     currentPlayer.play()
   }
 
+  fun shouldSuppressMediaSessionPlay(): Boolean {
+    if (!isAndroidAuto) return false
+
+    if (currentPlaybackSession == null) {
+      suppressNextAndroidAutoPlay = true
+      return true
+    }
+    if (suppressNextAndroidAutoPlay) {
+      suppressNextAndroidAutoPlay = false
+      Log.d(tag, "Ignoring Android Auto startup play after restoring paused session")
+      return true
+    }
+    return false
+  }
+
   fun pause() {
     currentPlayer.pause()
   }
@@ -1467,6 +1534,7 @@ class PlayerNotificationService : MediaBrowserServiceCompat() {
                           mediaManager.allLibraryPersonalizationsDone
                   )
           onBrowseTreeInitialized()
+          prepareLastPlayedAudiobook()
           val children =
                   browseTree[parentMediaId]?.map { item ->
                     Log.d(tag, "Found top menu item: ${item.description.title}")
@@ -1502,6 +1570,7 @@ class PlayerNotificationService : MediaBrowserServiceCompat() {
                         mediaManager.allLibraryPersonalizationsDone
                 )
         onBrowseTreeInitialized()
+        prepareLastPlayedAudiobook()
         val children =
                 browseTree[parentMediaId]?.map { item ->
                   Log.d(tag, "Found top menu item: ${item.description.title}")
