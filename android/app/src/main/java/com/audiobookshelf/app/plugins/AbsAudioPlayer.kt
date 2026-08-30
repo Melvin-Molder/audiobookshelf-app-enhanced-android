@@ -305,6 +305,22 @@ class AbsAudioPlayer : Plugin() {
   }
 
   @PluginMethod
+  fun getCurrentPlaybackState(call: PluginCall) {
+    Handler(Looper.getMainLooper()).post {
+      val ret = JSObject()
+      if (::playerNotificationService.isInitialized) {
+        playerNotificationService.getCurrentPlaybackSessionCopy()?.let {
+          ret.put("playbackSession", JSObject(jacksonMapper.writeValueAsString(it)))
+        }
+        ret.put("isPlaying", playerNotificationService.currentPlayer.isPlaying)
+        ret.put("currentTime", playerNotificationService.getCurrentTimeSeconds())
+        ret.put("duration", playerNotificationService.getDuration() / 1000.0)
+      }
+      call.resolve(ret)
+    }
+  }
+
+  @PluginMethod
   fun pausePlayer(call: PluginCall) {
     Handler(Looper.getMainLooper()).post {
       playerNotificationService.pause()

@@ -921,6 +921,19 @@ export default {
       AbsAudioPlayer.addListener('onProgressSyncFailing', this.showProgressSyncIsFailing)
       AbsAudioPlayer.addListener('onProgressSyncSuccess', this.showProgressSyncSuccess)
       AbsAudioPlayer.addListener('onPlaybackSpeedChanged', this.onPlaybackSpeedChanged)
+
+      if (this.$platform === 'android') {
+        const state = await AbsAudioPlayer.getCurrentPlaybackState()
+        if (state.playbackSession) {
+          this.onPlaybackSession(state.playbackSession)
+          this.onPlayingUpdate({ value: state.isPlaying })
+          this.onMetadata({
+            duration: state.duration,
+            currentTime: state.currentTime,
+            playerState: 'READY'
+          })
+        }
+      }
     },
     async screenOrientationChange() {
       if (this.isRefreshingUI) return
