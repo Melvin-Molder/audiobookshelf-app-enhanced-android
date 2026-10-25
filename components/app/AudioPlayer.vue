@@ -111,7 +111,7 @@
           <div class="flex-grow" />
           <p class="font-mono text-fg" style="font-size: 0.8rem">{{ timeRemainingPretty }}</p>
         </div>
-        <div ref="track" class="h-1.5 w-full bg-track/50 relative rounded-full overflow-hidden" :class="{ 'animate-pulse': showLoadingState }" @click.stop>
+        <div ref="track" class="h-1.5 w-full bg-track/50 relative rounded-full" :class="{ 'animate-pulse': showLoadingState }" @click.stop>
           <div ref="readyTrack" class="h-full bg-track-buffered absolute top-0 left-0 rounded-full pointer-events-none" />
           <div ref="bufferedTrack" class="h-full bg-track absolute top-0 left-0 rounded-full pointer-events-none" />
           <div ref="playedTrack" class="h-full bg-track-cursor absolute top-0 left-0 rounded-full pointer-events-none" />
@@ -800,8 +800,7 @@ export default {
       })
     },
     updateUseChapterTrack() {
-      // Chapter track in NowPlaying only supported on iOS for now
-      if (this.$platform === 'ios') {
+      if (this.$platform === 'ios' || this.$platform === 'android') {
         AbsAudioPlayer.setChapterTrack({ enabled: this.playerSettings.useChapterTrack })
       }
     },
@@ -912,6 +911,7 @@ export default {
     },
     async init() {
       await this.loadPlayerSettings()
+      this.updateUseChapterTrack()
 
       AbsAudioPlayer.addListener('onPlaybackSession', this.onPlaybackSession)
       AbsAudioPlayer.addListener('onPlaybackClosed', this.onPlaybackClosed)
@@ -921,6 +921,19 @@ export default {
       AbsAudioPlayer.addListener('onProgressSyncFailing', this.showProgressSyncIsFailing)
       AbsAudioPlayer.addListener('onProgressSyncSuccess', this.showProgressSyncSuccess)
       AbsAudioPlayer.addListener('onPlaybackSpeedChanged', this.onPlaybackSpeedChanged)
+
+      if (this.$platform === 'android') {
+        const state = await AbsAudioPlayer.getCurrentPlaybackState()
+        if (state.playbackSession) {
+          this.onPlaybackSession(state.playbackSession)
+          this.onPlayingUpdate({ value: state.isPlaying })
+          this.onMetadata({
+            duration: state.duration,
+            currentTime: state.currentTime,
+            playerState: 'READY'
+          })
+        }
+      }
     },
     async screenOrientationChange() {
       if (this.isRefreshingUI) return

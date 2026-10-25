@@ -36,8 +36,7 @@ class AbMediaDescriptionAdapter (private val controller: MediaControllerCompat, 
     val albumBitmap = controller.metadata.description.iconBitmap
       ?: controller.metadata.getBitmap(MediaMetadataCompat.METADATA_KEY_ALBUM_ART)
 
-    // Reuse bitmap from queue navigator (local) or PlaybackSession.resolveCoverBitmapAsync (streaming)
-    // For local cover images, bitmap is set in PlayerNotificationService TimelineQueueNavigator.getMediaDescription
+    // Reuse bitmap from PlaybackSession.resolveCoverBitmapAsync (local and streaming)
     if (albumBitmap != null) {
       return albumBitmap
     }

@@ -163,6 +163,7 @@ export const actions = {
     await this.$db.logout()
     this.$socket.logout()
     this.$localStore.removeLastLibraryId()
+    this.$localStore.removeBookshelfCacheLibraryId()
     commit('logout')
     commit('libraries/setCurrentLibrary', null, { root: true })
     await AbsLogger.info({ tag: 'user', message: `Logged out from server ${state.serverConnectionConfig?.name || 'Not connected'}` })

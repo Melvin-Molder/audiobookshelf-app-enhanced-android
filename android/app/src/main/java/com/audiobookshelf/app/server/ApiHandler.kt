@@ -509,6 +509,34 @@ class ApiHandler(var ctx:Context) {
     }
   }
 
+  /**
+   * Returns the book items of each of the user's playlists in the library, in playlist order.
+   * Podcast episodes are skipped.
+   */
+  fun getLibraryPlaylistBooks(libraryId:String, cb: (List<List<LibraryItem>>) -> Unit) {
+    getRequest("/api/libraries/$libraryId/playlists", null, null) {
+      val playlists = mutableListOf<List<LibraryItem>>()
+      if (it.has("results")) {
+        val array = it.getJSONArray("results")
+        for (i in 0 until array.length()) {
+          val playlistItems = array.getJSONObject(i).optJSONArray("items") ?: continue
+          val books = mutableListOf<LibraryItem>()
+          for (j in 0 until playlistItems.length()) {
+            val playlistItem = playlistItems.getJSONObject(j)
+            if (playlistItem.has("episodeId") || !playlistItem.has("libraryItem")) continue
+            try {
+              books.add(jacksonMapper.readValue<LibraryItem>(playlistItem.getJSONObject("libraryItem").toString()))
+            } catch (e: Exception) {
+              Log.e(tag, "getLibraryPlaylistBooks: Failed to parse playlist item ${e.message}")
+            }
+          }
+          playlists.add(books)
+        }
+      }
+      cb(playlists)
+    }
+  }
+
   fun getLibraryAuthors(libraryId:String, cb: (List<LibraryAuthorItem>) -> Unit) {
     Log.d(tag, "Getting series")
     getRequest("/api/libraries/$libraryId/authors", null, null) {

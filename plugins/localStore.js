@@ -106,6 +106,45 @@ class LocalStorage {
     }
   }
 
+  // Bookshelf cache uses the WebView's localStorage (not Preferences) so it can be read synchronously for the first render on app start
+
+  /**
+   * @param {{serverConnectionConfigId:string, serverAddress:string, libraryId:string, mediaType:string, categories:Object[]}} cache
+   */
+  setBookshelfCache(cache) {
+    try {
+      localStorage.setItem(`bookshelfCache_${cache.libraryId}`, JSON.stringify(cache))
+      // Remember the last cached library so the cache can be shown on app start before the server connection sets the current library
+      localStorage.setItem('bookshelfCacheLibraryId', cache.libraryId)
+    } catch (error) {
+      console.error('[LocalStorage] Failed to cache bookshelf', error)
+    }
+  }
+
+  /**
+   * @param {string} [libraryId] defaults to the last cached library
+   * @returns {{serverConnectionConfigId:string, serverAddress:string, libraryId:string, mediaType:string, categories:Object[]}|null}
+   */
+  getBookshelfCache(libraryId = null) {
+    try {
+      libraryId = libraryId || localStorage.getItem('bookshelfCacheLibraryId')
+      if (!libraryId) return null
+      const cache = JSON.parse(localStorage.getItem(`bookshelfCache_${libraryId}`) || 'null')
+      return cache?.categories?.length ? cache : null
+    } catch (error) {
+      console.error('[LocalStorage] Failed to get cached bookshelf', error)
+      return null
+    }
+  }
+
+  removeBookshelfCacheLibraryId() {
+    try {
+      localStorage.removeItem('bookshelfCacheLibraryId')
+    } catch (error) {
+      console.error('[LocalStorage] Failed to remove bookshelf cache library id', error)
+    }
+  }
+
   async setTheme(theme) {
     try {
       await Preferences.set({ key: 'theme', value: theme })

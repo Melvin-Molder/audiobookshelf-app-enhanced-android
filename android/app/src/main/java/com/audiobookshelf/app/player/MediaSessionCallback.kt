@@ -26,7 +26,7 @@ class MediaSessionCallback(var playerNotificationService:PlayerNotificationServi
         } else {
           val playbackRate = playerNotificationService.mediaManager.getSavedPlaybackRate()
           Handler(Looper.getMainLooper()).post {
-            playerNotificationService.preparePlayer(it,true, playbackRate)
+            playerNotificationService.preparePlayer(it, false, playbackRate)
           }
         }
       }
@@ -35,6 +35,7 @@ class MediaSessionCallback(var playerNotificationService:PlayerNotificationServi
 
   override fun onPlay() {
     Log.d(tag, "ON PLAY MEDIA SESSION COMPAT")
+    if (playerNotificationService.shouldSuppressMediaSessionPlay()) return
     playerNotificationService.play()
   }
 
@@ -76,6 +77,10 @@ class MediaSessionCallback(var playerNotificationService:PlayerNotificationServi
     playerNotificationService.skipToNext()
   }
 
+  override fun onSkipToQueueItem(id: Long) {
+    playerNotificationService.skipToChapter(id)
+  }
+
   override fun onFastForward() {
     playerNotificationService.jumpForward()
   }
@@ -85,8 +90,8 @@ class MediaSessionCallback(var playerNotificationService:PlayerNotificationServi
   }
 
   override fun onSeekTo(pos: Long) {
-    val currentTrackStartOffset = playerNotificationService.getCurrentTrackStartOffsetMs()
-    playerNotificationService.seekPlayer(currentTrackStartOffset + pos)
+    val progressStart = playerNotificationService.getMediaSessionChapter()?.startMs ?: 0L
+    playerNotificationService.seekPlayer(progressStart + pos)
   }
 
   private fun onChangeSpeed() {
@@ -281,6 +286,7 @@ class MediaSessionCallback(var playerNotificationService:PlayerNotificationServi
       CUSTOM_ACTION_SKIP_FORWARD -> onSkipToNext()
       CUSTOM_ACTION_SKIP_BACKWARD -> onSkipToPrevious()
       CUSTOM_ACTION_CHANGE_SPEED -> onChangeSpeed()
+      CUSTOM_ACTION_NEXT_BOOK -> playerNotificationService.playNextBook()
     }
   }
 }
