@@ -1,5 +1,5 @@
 <template>
-  <div ref="card" tabindex="0" :id="`book-card-${index}`" :style="{ minWidth: width + 'px', maxWidth: width + 'px', height: height + 'px' }" class="rounded-sm z-10 bg-primary cursor-pointer box-shadow-book" @click="clickCard">
+  <div ref="card" :tabindex="isUnavailableOffline ? -1 : 0" :aria-disabled="isUnavailableOffline" :id="`book-card-${index}`" :style="{ minWidth: width + 'px', maxWidth: width + 'px', height: height + 'px' }" class="rounded-sm z-10 bg-primary box-shadow-book" :class="isUnavailableOffline ? 'opacity-40 cursor-default grayscale' : 'cursor-pointer'" @click="clickCard">
     <!-- When cover image does not fill -->
     <div v-show="showCoverBg" class="absolute top-0 left-0 w-full h-full overflow-hidden rounded-sm bg-primary">
       <div class="absolute cover-bg" ref="coverBg" />
@@ -152,6 +152,9 @@ export default {
     },
     isLocal() {
       return !!this._libraryItem.isLocal
+    },
+    isUnavailableOffline() {
+      return !!this._libraryItem.isUnavailableOffline
     },
     media() {
       return this._libraryItem.media || {}
@@ -455,7 +458,7 @@ export default {
     },
     async play() {},
     async playEpisode() {
-      if (this.playerIsStartingPlayback) return
+      if (this.isUnavailableOffline || this.playerIsStartingPlayback) return
 
       await this.$hapticsImpact()
       const eventBus = this.$eventBus || this.$nuxt.$eventBus
@@ -479,6 +482,7 @@ export default {
       eventBus.$emit('play-item', { libraryItemId: this.libraryItemId, episodeId: this.recentEpisode.id })
     },
     async clickCard(e) {
+      if (this.isUnavailableOffline) return
       if (this.isSelectionMode) {
         e.stopPropagation()
         e.preventDefault()

@@ -37,7 +37,8 @@ export const getters = {
       // Absolute URL covers (should no longer be used)
       if (media.coverPath.startsWith('http:') || media.coverPath.startsWith('https:')) return media.coverPath
 
-      const serverAddress = rootGetters['user/getServerAddress']
+      // Cached bookshelf items use the cached server address until the server connection is made
+      const serverAddress = rootGetters['user/getServerAddress'] || libraryItem.cachedServerAddress
       if (!serverAddress) return placeholder
 
       const lastUpdate = libraryItem.updatedAt || Date.now()

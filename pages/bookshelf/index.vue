@@ -98,6 +98,12 @@ export default {
     currentLibraryId() {
       return this.$store.state.libraries.currentLibraryId
     },
+    serverConnectionConfigId() {
+      return this.$store.getters['user/getServerConnectionConfigId']
+    },
+    isConnectedToServer() {
+      return !!this.user && this.networkConnected
+    },
     currentLibraryMediaType() {
       return this.$store.getters['libraries/getCurrentLibraryMediaType']
     },
@@ -206,6 +212,51 @@ export default {
 
       return categories
     },
+    prepareServerCategories(categories, localCategories, { isOnline, mediaType, cachedServerAddress = null }) {
+      const shelves = categories.map((category) => {
+        if (category.type === 'series' && cachedServerAddress) {
+          // Series covers are built from the series books
+          return {
+            ...category,
+            entities: category.entities.map((series) => ({ ...series, books: (series.books || []).map((book) => ({ ...book, cachedServerAddress })) }))
+          }
+        }
+        if (category.type !== 'book' && category.type !== 'podcast' && category.type !== 'episode') return category
+
+        return {
+          ...category,
+          entities: category.entities.map((cachedEntity) => {
+            const entity = { ...cachedEntity }
+            const localLibraryItem = this.localLibraryItems.find((item) => item.libraryItemId === entity.id)
+            if (localLibraryItem) entity.localLibraryItem = localLibraryItem
+
+            let isDownloaded = !!localLibraryItem
+            if (category.type === 'episode') {
+              isDownloaded = !!localLibraryItem?.media?.episodes?.some((episode) => episode.serverEpisodeId === entity.recentEpisode?.id)
+            }
+            entity.isUnavailableOffline = !isOnline && !isDownloaded
+            if (cachedServerAddress) entity.cachedServerAddress = cachedServerAddress
+            return entity
+          })
+        }
+      })
+
+      const localShelves = localCategories.filter((category) => category.type === mediaType && !category.localOnly)
+      return shelves.concat(localShelves)
+    },
+    prepareCachedShelves(bookshelfCache, localCategories) {
+      return this.prepareServerCategories(bookshelfCache.categories, localCategories, {
+        isOnline: this.isConnectedToServer,
+        mediaType: this.currentLibraryMediaType || bookshelfCache.mediaType,
+        cachedServerAddress: bookshelfCache.serverAddress
+      })
+    },
+    async getBookshelfCache() {
+      // Before the server connection is made on app start, use the last server and the last cached library
+      const serverConnectionConfigId = this.serverConnectionConfigId || (await this.$db.getDeviceData())?.lastServerConnectionConfigId
+      const bookshelfCache = this.$localStore.getBookshelfCache(this.currentLibraryId || null)
+      return serverConnectionConfigId && bookshelfCache?.serverConnectionConfigId === serverConnectionConfigId ? bookshelfCache : null
+    },
     async fetchCategories() {
       console.log(`[categories] fetchCategories networkConnected=${this.networkConnected}, lastServerFetch=${this.lastServerFetch}, lastLocalFetch=${this.lastLocalFetch}`)
 
@@ -235,11 +286,12 @@ export default {
 
       this.isLoading = true
 
-      // Set local library items first
-      this.localLibraryItems = await this.$db.getLocalLibraryItems()
+      // Set cached server shelves and local library items first
+      const [localLibraryItems, bookshelfCache] = await Promise.all([this.$db.getLocalLibraryItems(), this.getBookshelfCache()])
+      this.localLibraryItems = localLibraryItems
       const localCategories = this.getLocalMediaItemCategories()
-      this.shelves = localCategories
-      console.log('[categories] Local shelves set', this.shelves.length, this.lastLocalFetch)
+      this.shelves = bookshelfCache ? this.prepareCachedShelves(bookshelfCache, localCategories) : localCategories
+      console.log(`[categories] ${bookshelfCache ? `Cached shelves set for library ${bookshelfCache.libraryId}` : 'Local shelves set'}`, this.shelves.length, this.lastLocalFetch)
 
       if (isConnectedToServerWithInternet) {
         const categories = await this.$nativeHttp.get(`/api/libraries/${this.currentLibraryId}/personalized?minified=1&include=rssfeed,numEpisodesIncomplete`, { connectTimeout: 10000 }).catch((error) => {
@@ -247,34 +299,22 @@ export default {
           return []
         })
         if (!categories.length) {
-          // Failed to load categories so use local shelves
-          console.warn(`[categories] Failed to get server categories so using local categories`)
+          console.warn(`[categories] Failed to get server categories so using cached/local categories`)
           this.lastServerFetch = 0
           this.lastLocalFetch = Date.now()
           this.isLoading = false
-          console.log('[categories] Local shelves set from failure', this.shelves.length, this.lastLocalFetch)
+          console.log('[categories] Cached/local shelves retained after failure', this.shelves.length, this.lastLocalFetch)
           return
         }
 
-        this.shelves = categories.map((cat) => {
-          if (cat.type == 'book' || cat.type == 'podcast' || cat.type == 'episode') {
-            // Map localLibraryItem to entities
-            cat.entities = cat.entities.map((entity) => {
-              const localLibraryItem = this.localLibraryItems.find((lli) => {
-                return lli.libraryItemId == entity.id
-              })
-              if (localLibraryItem) {
-                entity.localLibraryItem = localLibraryItem
-              }
-              return entity
-            })
-          }
-          return cat
+        this.$localStore.setBookshelfCache({
+          serverConnectionConfigId: this.serverConnectionConfigId,
+          serverAddress: this.$store.getters['user/getServerAddress'],
+          libraryId: this.currentLibraryId,
+          mediaType: this.currentLibraryMediaType,
+          categories
         })
-
-        // Only add the local shelf with the same media type
-        const localShelves = localCategories.filter((cat) => cat.type === this.currentLibraryMediaType && !cat.localOnly)
-        this.shelves.push(...localShelves)
+        this.shelves = this.prepareServerCategories(categories, localCategories, { isOnline: true, mediaType: this.currentLibraryMediaType })
         console.log('[categories] Server shelves set', this.shelves.length, this.lastServerFetch)
       }
 
@@ -331,6 +371,15 @@ export default {
     },
     removeListeners() {
       this.$eventBus.$off('library-changed', this.libraryChanged)
+    }
+  },
+  created() {
+    // Show the cached server shelves on the first render instead of a loading screen.
+    // fetchCategories checks the cache belongs to the last server and replaces it with local or server shelves
+    const bookshelfCache = this.$localStore.getBookshelfCache(this.currentLibraryId || null)
+    if (bookshelfCache && (!this.serverConnectionConfigId || bookshelfCache.serverConnectionConfigId === this.serverConnectionConfigId)) {
+      this.shelves = this.prepareCachedShelves(bookshelfCache, [])
+      console.log(`[categories] Cached shelves set on create for library ${bookshelfCache.libraryId}`, this.shelves.length)
     }
   },
   async mounted() {
