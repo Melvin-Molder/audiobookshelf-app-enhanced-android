@@ -4,14 +4,11 @@ import android.annotation.SuppressLint
 import android.app.*
 import android.content.Context
 import android.content.Intent
-import android.graphics.Bitmap
 import android.graphics.Color
-import android.graphics.ImageDecoder
 import android.hardware.Sensor
 import android.hardware.SensorManager
 import android.net.*
 import android.os.*
-import android.provider.MediaStore
 import android.provider.Settings
 import android.support.v4.media.MediaBrowserCompat
 import android.support.v4.media.MediaDescriptionCompat
@@ -44,7 +41,6 @@ import com.google.android.exoplayer2.*
 import com.google.android.exoplayer2.audio.AudioAttributes
 import com.google.android.exoplayer2.ext.mediasession.MediaSessionConnector
 import com.google.android.exoplayer2.ext.mediasession.MediaSessionConnector.CustomActionProvider
-import com.google.android.exoplayer2.ext.mediasession.TimelineQueueNavigator
 import com.google.android.exoplayer2.extractor.DefaultExtractorsFactory
 import com.google.android.exoplayer2.extractor.mp3.Mp3Extractor
 import com.google.android.exoplayer2.source.MediaSource
@@ -127,6 +123,10 @@ class PlayerNotificationService : MediaBrowserServiceCompat() {
   private val chapterProgressHandler = Handler(Looper.getMainLooper())
   private val chapterProgressRefresh = Runnable { refreshChapterProgress() }
   private var useChapterTrack = false
+  // Book offered by the Android Auto "Next Book" action: next in a playlist, else next in series
+  private var nextBook: LibraryItem? = null
+  // Chapter index the published queue starts at (-1 when no queue is published)
+  private var queueStartChapterIndex = -1
 
   private var isAndroidAuto = false
 
@@ -323,56 +323,46 @@ class PlayerNotificationService : MediaBrowserServiceCompat() {
       )
         ?: MediaMetadataCompat.Builder().build()
     }
-    val queueNavigator: TimelineQueueNavigator =
-            object : TimelineQueueNavigator(mediaSession) {
+    // Publishes the book's chapters as the media session queue (shown in Android Auto's queue)
+    val queueNavigator =
+            object : MediaSessionConnector.QueueNavigator {
               override fun getSupportedQueueNavigatorActions(player: Player): Long {
-                return 0L
+                return if ((currentPlaybackSession?.chapters?.size ?: 0) > 1)
+                        PlaybackStateCompat.ACTION_SKIP_TO_QUEUE_ITEM
+                else 0L
               }
 
-              override fun getMediaDescription(
+              override fun onTimelineChanged(player: Player) {
+                publishChapterQueue()
+              }
+
+              override fun getActiveQueueItemId(player: Player?): Long {
+                val playbackSession = currentPlaybackSession
+                if (player == null || playbackSession == null) {
+                  return MediaSessionCompat.QueueItem.UNKNOWN_ID.toLong()
+                }
+                // Not the passed player: with chapter track it is ChapterProgressPlayer, whose position is chapter relative
+                val chapter = playbackSession.getChapterForTime(getCurrentTime())
+                        ?: return MediaSessionCompat.QueueItem.UNKNOWN_ID.toLong()
+                return playbackSession.chapters.indexOf(chapter).toLong()
+              }
+
+              // Skip/queue commands are handled by MediaSessionCallback, which replaces the connector's callback
+              override fun onSkipToPrevious(player: Player) {}
+
+              override fun onSkipToQueueItem(player: Player, id: Long) {
+                skipToChapter(id)
+              }
+
+              override fun onSkipToNext(player: Player) {}
+
+              override fun onCommand(
                       player: Player,
-                      windowIndex: Int
-              ): MediaDescriptionCompat {
-                if (currentPlaybackSession == null) {
-                  Log.e(tag, "Playback session is not set - returning blank MediaDescriptionCompat")
-                  return MediaDescriptionCompat.Builder().build()
-                }
-
-                val coverUri = currentPlaybackSession!!.getCoverUri(ctx)
-
-
-                var bitmap: Bitmap? = null
-                // Local covers get bitmap
-                // Note: In Android Auto for local cover images, setting the icon uri to a local path does not work (cover is blank)
-                // so we create and set the bitmap here instead of AbMediaDescriptionAdapter
-                if (currentPlaybackSession!!.localLibraryItem?.coverContentUrl != null) {
-                  bitmap =
-                    if (Build.VERSION.SDK_INT < 28) {
-                      MediaStore.Images.Media.getBitmap(ctx.contentResolver, coverUri)
-                    } else {
-                      val source: ImageDecoder.Source =
-                        ImageDecoder.createSource(ctx.contentResolver, coverUri)
-                      ImageDecoder.decodeBitmap(source)
-                    }
-                }
-
-                grantCoverUriPermissions(coverUri)
-
-                val extra = Bundle()
-                extra.putString(
-                        MediaMetadataCompat.METADATA_KEY_ARTIST,
-                        currentPlaybackSession!!.displayAuthor
-                )
-
-                val mediaDescriptionBuilder =
-                        MediaDescriptionCompat.Builder()
-                                .setExtras(extra)
-                                .setTitle(currentPlaybackSession!!.displayTitle)
-
-                bitmap?.let { mediaDescriptionBuilder.setIconBitmap(it) }
-                  ?: mediaDescriptionBuilder.setIconUri(coverUri)
-
-                return mediaDescriptionBuilder.build()
+                      command: String,
+                      extras: Bundle?,
+                      cb: ResultReceiver?
+              ): Boolean {
+                return false
               }
             }
 
@@ -437,7 +427,11 @@ class PlayerNotificationService : MediaBrowserServiceCompat() {
     mediaSessionConnector.invalidateMediaSessionPlaybackState()
     mediaSessionConnector.invalidateMediaSessionMetadata()
 
-    val chapter = getMediaSessionChapter() ?: return
+    // Book chapter (not media session chapter) so the queue follows the current chapter
+    val chapter = getCurrentBookChapter() ?: return
+    if (currentPlaybackSession?.chapters?.indexOf(chapter) != queueStartChapterIndex) {
+      publishChapterQueue()
+    }
     if (!currentPlayer.isPlaying) return
     val delayMs = ((chapter.endMs - getCurrentTime()) / currentPlayer.playbackParameters.speed)
       .toLong()
@@ -553,6 +547,8 @@ class PlayerNotificationService : MediaBrowserServiceCompat() {
               mediaSessionConnector.invalidateMediaSessionMetadata()
             }
     mediaSessionConnector.invalidateMediaSessionMetadata()
+    publishChapterQueue()
+    loadNextBook(playbackSession)
 
     AbsLogger.info("PlayerNotificationService", "preparePlayer: Started playback session for item ${currentPlaybackSession?.mediaItemId}. MediaPlayer ${currentPlaybackSession?.mediaPlayer}")
     // Notify client
@@ -738,6 +734,9 @@ class PlayerNotificationService : MediaBrowserServiceCompat() {
                       SkipForwardCustomActionProvider(),
               )
       )
+    }
+    if (nextBook != null) {
+      customActionProviders.add(NextBookCustomActionProvider())
     }
     mediaSessionConnector.setCustomActionProviders(*customActionProviders.toTypedArray())
   }
@@ -1201,6 +1200,129 @@ class PlayerNotificationService : MediaBrowserServiceCompat() {
       return
     }
     currentPlayer.seekToNext()
+  }
+
+  fun skipToChapter(chapterIndex: Long) {
+    currentPlaybackSession?.chapters?.getOrNull(chapterIndex.toInt())?.let { seekPlayer(it.startMs) }
+  }
+
+  /**
+   * Sets the media session queue to the current book's chapters (shown in Android Auto's queue).
+   * Android Auto has no way to scroll the queue, so it starts at the current chapter to keep that
+   * chapter at the top. It is republished from refreshChapterProgress when the chapter changes.
+   */
+  private fun publishChapterQueue() {
+    val playbackSession = currentPlaybackSession
+    if (playbackSession == null || playbackSession.chapters.size < 2) {
+      queueStartChapterIndex = -1
+      mediaSession.setQueue(null)
+      mediaSession.setQueueTitle(null)
+      return
+    }
+
+    val currentChapter = playbackSession.getChapterForTime(getCurrentTime())
+    queueStartChapterIndex = playbackSession.chapters.indexOf(currentChapter).coerceAtLeast(0)
+
+    val queueItems =
+            playbackSession.chapters.withIndex().drop(queueStartChapterIndex).map { (index, chapter) ->
+              val description =
+                      MediaDescriptionCompat.Builder()
+                              .setMediaId("${playbackSession.mediaItemId}-chapter-$index")
+                              .setTitle(chapter.title ?: "Chapter ${index + 1}")
+                              .setSubtitle(formatChapterDuration(chapter.endMs - chapter.startMs))
+                              .build()
+              MediaSessionCompat.QueueItem(description, index.toLong())
+            }
+    mediaSession.setQueue(queueItems)
+    mediaSession.setQueueTitle(playbackSession.displayTitle)
+  }
+
+  private fun formatChapterDuration(durationMs: Long): String {
+    val totalSeconds = durationMs.coerceAtLeast(0L) / 1000L
+    val hours = totalSeconds / 3600
+    val minutes = (totalSeconds % 3600) / 60
+    val seconds = totalSeconds % 60
+    return if (hours > 0) String.format(Locale.US, "%d:%02d:%02d", hours, minutes, seconds)
+    else String.format(Locale.US, "%d:%02d", minutes, seconds)
+  }
+
+  /**
+   * Finds the book to play next and shows the "Next Book" action when there is one.
+   * The next book in a playlist containing this book takes priority over the next book in its series.
+   */
+  private fun loadNextBook(playbackSession: PlaybackSession) {
+    nextBook = null
+    setMediaSessionConnectorCustomActions(playbackSession)
+    if (playbackSession.isPodcastEpisode) return
+
+    val onNextBookFound: (LibraryItem?) -> Unit = { libraryItem ->
+      Handler(Looper.getMainLooper()).post {
+        // Ignore the result if playback moved on to another session while loading
+        if (libraryItem != null && currentPlaybackSession?.id == playbackSession.id) {
+          Log.d(tag, "loadNextBook: Next book is ${libraryItem.title}")
+          nextBook = libraryItem
+          setMediaSessionConnectorCustomActions(playbackSession)
+        }
+      }
+    }
+
+    val serverLibraryItem = playbackSession.libraryItem
+    if (serverLibraryItem != null) {
+      findNextBook(serverLibraryItem, onNextBookFound)
+      return
+    }
+
+    // Downloaded book: look up the server item if it belongs to the connected server
+    val libraryItemId = playbackSession.libraryItemId
+    if (libraryItemId.isNullOrEmpty() ||
+                    playbackSession.serverConnectionConfigId != DeviceManager.serverConnectionConfigId ||
+                    !DeviceManager.checkConnectivity(ctx)
+    ) {
+      return
+    }
+    apiHandler.getLibraryItem(libraryItemId) { libraryItem ->
+      libraryItem?.let { findNextBook(it, onNextBookFound) }
+    }
+  }
+
+  private fun findNextBook(libraryItem: LibraryItem, cb: (LibraryItem?) -> Unit) {
+    apiHandler.getLibraryPlaylistBooks(libraryItem.libraryId) { playlists ->
+      val nextPlaylistBook =
+              playlists.firstNotNullOfOrNull { books ->
+                val index = books.indexOfFirst { it.id == libraryItem.id }
+                if (index < 0) null else books.drop(index + 1).firstOrNull { it.checkHasTracks() }
+              }
+      if (nextPlaylistBook != null) {
+        cb(nextPlaylistBook)
+        return@getLibraryPlaylistBooks
+      }
+
+      val seriesId = ((libraryItem.media as? Book)?.metadata as? BookMetadata)?.series?.firstOrNull()?.id
+      if (seriesId == null) {
+        cb(null)
+        return@getLibraryPlaylistBooks
+      }
+      mediaManager.loadLibrarySeriesItemsWithAudio(libraryItem.libraryId, seriesId) { seriesBooks ->
+        val index = seriesBooks.indexOfFirst { it.id == libraryItem.id }
+        cb(if (index < 0) null else seriesBooks.getOrNull(index + 1))
+      }
+    }
+  }
+
+  fun playNextBook() {
+    val libraryItem = nextBook ?: return
+    // Prefer the downloaded copy when there is one
+    val libraryItemWrapper: LibraryItemWrapper =
+            DeviceManager.dbManager.getLocalLibraryItemByLId(libraryItem.id) ?: libraryItem
+    mediaManager.play(libraryItemWrapper, null, getPlayItemRequestPayload(false)) {
+      if (it == null) {
+        Log.e(tag, "playNextBook: Failed to play ${libraryItem.title}")
+      } else {
+        Handler(Looper.getMainLooper()).post {
+          preparePlayer(it, true, mediaManager.getSavedPlaybackRate())
+        }
+      }
+    }
   }
 
   fun jumpForward() {
@@ -2391,6 +2513,24 @@ class PlayerNotificationService : MediaBrowserServiceCompat() {
                       CUSTOM_ACTION_SKIP_BACKWARD,
                       getContext().getString(R.string.action_skip_backward),
                       R.drawable.skip_previous_24
+              )
+              .build()
+    }
+  }
+
+  inner class NextBookCustomActionProvider : CustomActionProvider {
+    override fun onCustomAction(player: Player, action: String, extras: Bundle?) {
+      /*
+      This does not appear to ever get called. Instead, MediaSessionCallback.onCustomAction() is
+      responsible to reacting to a custom action.
+       */
+    }
+
+    override fun getCustomAction(player: Player): PlaybackStateCompat.CustomAction? {
+      return PlaybackStateCompat.CustomAction.Builder(
+                      CUSTOM_ACTION_NEXT_BOOK,
+                      getContext().getString(R.string.action_next_book),
+                      R.drawable.next_book_24
               )
               .build()
     }

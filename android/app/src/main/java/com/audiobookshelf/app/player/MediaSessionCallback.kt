@@ -77,6 +77,10 @@ class MediaSessionCallback(var playerNotificationService:PlayerNotificationServi
     playerNotificationService.skipToNext()
   }
 
+  override fun onSkipToQueueItem(id: Long) {
+    playerNotificationService.skipToChapter(id)
+  }
+
   override fun onFastForward() {
     playerNotificationService.jumpForward()
   }
@@ -282,6 +286,7 @@ class MediaSessionCallback(var playerNotificationService:PlayerNotificationServi
       CUSTOM_ACTION_SKIP_FORWARD -> onSkipToNext()
       CUSTOM_ACTION_SKIP_BACKWARD -> onSkipToPrevious()
       CUSTOM_ACTION_CHANGE_SPEED -> onChangeSpeed()
+      CUSTOM_ACTION_NEXT_BOOK -> playerNotificationService.playNextBook()
     }
   }
 }
