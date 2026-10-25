@@ -64,6 +64,7 @@ import kotlinx.coroutines.runBlocking
 const val SLEEP_TIMER_WAKE_UP_EXPIRATION = 120000L // 2m
 const val PLAYER_CAST = "cast-player"
 const val PLAYER_EXO = "exo-player"
+const val PREVIOUS_CHAPTER_THRESHOLD_MS = 4000L // Within this time of chapter start, skip previous goes to prior chapter
 
 class PlayerNotificationService : MediaBrowserServiceCompat() {
 
@@ -1178,7 +1179,17 @@ class PlayerNotificationService : MediaBrowserServiceCompat() {
 
   fun skipToPrevious() {
     if (useChapterTrack) {
-      getPreviousBookChapter()?.let { seekPlayer(it.startMs) }
+      val currentChapter = getCurrentBookChapter()
+      if (currentChapter == null) {
+        seekPlayer(0L)
+        return
+      }
+      // If more than 4 seconds into the current chapter, restart it. Otherwise go to the previous chapter
+      if (getCurrentTime() - currentChapter.startMs > PREVIOUS_CHAPTER_THRESHOLD_MS) {
+        seekPlayer(currentChapter.startMs)
+      } else {
+        seekPlayer(getPreviousBookChapter()?.startMs ?: currentChapter.startMs)
+      }
       return
     }
     currentPlayer.seekToPrevious()
