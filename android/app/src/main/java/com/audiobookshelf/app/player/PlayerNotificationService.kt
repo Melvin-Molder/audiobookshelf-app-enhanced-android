@@ -4,6 +4,7 @@ import android.annotation.SuppressLint
 import android.app.*
 import android.content.Context
 import android.content.Intent
+import android.graphics.Bitmap
 import android.graphics.Color
 import android.hardware.Sensor
 import android.hardware.SensorManager
@@ -62,6 +63,7 @@ const val PLAYER_CAST = "cast-player"
 const val PLAYER_EXO = "exo-player"
 const val PREVIOUS_CHAPTER_THRESHOLD_MS = 4000L // Within this time of chapter start, skip previous goes to prior chapter
 const val CHAPTER_PROGRESS_MAX_CHECK_MS = 1000L // Longest wait between checks for the current chapter changing while playing
+const val QUEUE_COVER_MAX_SIZE_PX = 320 // Cover bitmap size on the current queue item, kept small since the whole queue is sent in one transaction
 
 class PlayerNotificationService : MediaBrowserServiceCompat() {
 
@@ -130,6 +132,8 @@ class PlayerNotificationService : MediaBrowserServiceCompat() {
   private var queueStartChapterIndex = -1
   // Chapter index published by the last refreshChapterProgress (-1 when none)
   private var refreshedChapterIndex = -1
+  // Scaled cover bitmap for the current queue item, cached for the session it was made for
+  private var queueCoverBitmap: Pair<String, Bitmap>? = null
 
   private var isAndroidAuto = false
 
@@ -342,6 +346,8 @@ class PlayerNotificationService : MediaBrowserServiceCompat() {
                 if (player == null || playbackSession == null) {
                   return MediaSessionCompat.QueueItem.UNKNOWN_ID.toLong()
                 }
+                // Books without chapters have a single queue item for the book
+                if (playbackSession.chapters.size < 2) return 0L
                 // Not the passed player: with chapter track it is ChapterProgressPlayer, whose position is chapter relative
                 val chapter = playbackSession.getChapterForTime(getCurrentTime())
                         ?: return MediaSessionCompat.QueueItem.UNKNOWN_ID.toLong()
@@ -572,6 +578,8 @@ class PlayerNotificationService : MediaBrowserServiceCompat() {
     metadataArtJob =
             playbackSession.resolveCoverBitmapAsync(ctx, metadataScope) {
               mediaSessionConnector.invalidateMediaSessionMetadata()
+              // Queue cover uses the resolved bitmap
+              if (currentPlaybackSession?.id == playbackSession.id) publishChapterQueue()
             }
     mediaSessionConnector.invalidateMediaSessionMetadata()
     publishChapterQueue()
@@ -1168,20 +1176,43 @@ class PlayerNotificationService : MediaBrowserServiceCompat() {
   }
 
   fun skipToChapter(chapterIndex: Long) {
-    currentPlaybackSession?.chapters?.getOrNull(chapterIndex.toInt())?.let { seekPlayer(it.startMs) }
+    val chapters = currentPlaybackSession?.chapters ?: return
+    // Books without chapters have a single queue item for the book
+    if (chapters.size < 2) return
+    chapters.getOrNull(chapterIndex.toInt())?.let { seekPlayer(it.startMs) }
   }
 
   /**
    * Sets the media session queue to the current book's chapters (shown in Android Auto's queue).
    * Android Auto has no way to scroll the queue, so it starts at the current chapter to keep that
    * chapter at the top. It is republished from refreshChapterProgress when the chapter changes.
+   * Books without chapters get a single queue item for the book.
+   *
+   * The current item has the cover: Android Auto shows the current queue item's art in places
+   * such as the split screen media card.
    */
   private fun publishChapterQueue() {
     val playbackSession = currentPlaybackSession
-    if (playbackSession == null || playbackSession.chapters.size < 2) {
+    if (playbackSession == null) {
       queueStartChapterIndex = -1
       mediaSession.setQueue(null)
       mediaSession.setQueueTitle(null)
+      return
+    }
+
+    if (playbackSession.chapters.size < 2) {
+      queueStartChapterIndex = -1
+      val description =
+              setQueueCover(
+                              MediaDescriptionCompat.Builder()
+                                      .setMediaId(playbackSession.mediaItemId)
+                                      .setTitle(playbackSession.displayTitle)
+                                      .setSubtitle(playbackSession.displayAuthor),
+                              playbackSession
+                      )
+                      .build()
+      mediaSession.setQueue(listOf(MediaSessionCompat.QueueItem(description, 0L)))
+      mediaSession.setQueueTitle(playbackSession.displayTitle)
       return
     }
 
@@ -1190,16 +1221,47 @@ class PlayerNotificationService : MediaBrowserServiceCompat() {
 
     val queueItems =
             playbackSession.chapters.withIndex().drop(queueStartChapterIndex).map { (index, chapter) ->
-              val description =
+              val descriptionBuilder =
                       MediaDescriptionCompat.Builder()
                               .setMediaId("${playbackSession.mediaItemId}-chapter-$index")
                               .setTitle(chapter.title ?: "Chapter ${index + 1}")
                               .setSubtitle(formatChapterDuration(chapter.endMs - chapter.startMs))
-                              .build()
-              MediaSessionCompat.QueueItem(description, index.toLong())
+              if (index == queueStartChapterIndex) setQueueCover(descriptionBuilder, playbackSession)
+              MediaSessionCompat.QueueItem(descriptionBuilder.build(), index.toLong())
             }
     mediaSession.setQueue(queueItems)
     mediaSession.setQueueTitle(playbackSession.displayTitle)
+  }
+
+  /**
+   * Sets the cover on a queue item. Downloaded covers need the bitmap: Android Auto shows a blank
+   * cover for a local cover uri.
+   */
+  private fun setQueueCover(
+          descriptionBuilder: MediaDescriptionCompat.Builder,
+          playbackSession: PlaybackSession
+  ): MediaDescriptionCompat.Builder {
+    descriptionBuilder.setIconUri(playbackSession.getCoverUri(ctx))
+    getQueueCoverBitmap(playbackSession)?.let { descriptionBuilder.setIconBitmap(it) }
+    return descriptionBuilder
+  }
+
+  private fun getQueueCoverBitmap(playbackSession: PlaybackSession): Bitmap? {
+    queueCoverBitmap?.let { (sessionId, bitmap) -> if (sessionId == playbackSession.id) return bitmap }
+
+    val coverBitmap = playbackSession.resolvedCoverBitmap ?: return null
+    val scale = QUEUE_COVER_MAX_SIZE_PX.toFloat() / maxOf(coverBitmap.width, coverBitmap.height)
+    val bitmap =
+            if (scale >= 1f) coverBitmap
+            else
+                    Bitmap.createScaledBitmap(
+                            coverBitmap,
+                            (coverBitmap.width * scale).toInt().coerceAtLeast(1),
+                            (coverBitmap.height * scale).toInt().coerceAtLeast(1),
+                            true
+                    )
+    queueCoverBitmap = playbackSession.id to bitmap
+    return bitmap
   }
 
   private fun formatChapterDuration(durationMs: Long): String {

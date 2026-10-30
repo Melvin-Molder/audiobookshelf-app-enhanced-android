@@ -207,8 +207,9 @@ class PlaybackSession(
   }
 
   /** Bitmap for the cover art, once resolved */
-  @JsonIgnore
-  private var resolvedCoverBitmap: Bitmap? = null
+  @get:JsonIgnore
+  var resolvedCoverBitmap: Bitmap? = null
+    private set
 
   /**
    * Builds the current session metadata, including the cover art bitmap if it has already been resolved.
