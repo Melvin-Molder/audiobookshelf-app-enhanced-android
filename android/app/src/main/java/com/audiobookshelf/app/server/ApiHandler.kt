@@ -39,6 +39,11 @@ class ApiHandler(var ctx:Context) {
     // For sending data back to the Webview frontend
     lateinit var absDatabaseNotifyListeners:(String, JSObject) -> Unit
 
+    // Coalesces overlapping syncLocalSessionsWithServer calls (e.g. webview and Android Auto starting together)
+    private val serverSyncLock = Any()
+    private var isServerSyncRunning = false
+    private val pendingServerSyncCallbacks = mutableListOf<(String?) -> Unit>()
+
     fun checkAbsDatabaseNotifyListenersInitted():Boolean {
       return ::absDatabaseNotifyListeners.isInitialized
     }
@@ -794,6 +799,59 @@ class ApiHandler(var ctx:Context) {
     }
   }
 
+  /**
+   * Syncs with the connected server: progress with the most recent timestamp is kept on both sides, then
+   * playback sessions saved on the device (e.g. from listening offline or failed syncs) are sent to the server.
+   * Overlapping calls share one sync. Callback gets an error message if sending the saved sessions failed.
+   */
+  fun syncLocalSessionsWithServer(cb: (String?) -> Unit) {
+    if (DeviceManager.serverConnectionConfig == null) {
+      AbsLogger.error("ApiHandler", "syncLocalSessionsWithServer: not connected to server")
+      return cb(null)
+    }
+
+    synchronized(serverSyncLock) {
+      pendingServerSyncCallbacks.add(cb)
+      if (isServerSyncRunning) {
+        Log.d(tag, "syncLocalSessionsWithServer: Sync already in progress, queued callback")
+        return
+      }
+      isServerSyncRunning = true
+    }
+
+    val onSyncFinished: (String?) -> Unit = { error ->
+      val callbacks: List<(String?) -> Unit>
+      synchronized(serverSyncLock) {
+        isServerSyncRunning = false
+        callbacks = pendingServerSyncCallbacks.toList()
+        pendingServerSyncCallbacks.clear()
+      }
+      callbacks.forEach { it(error) }
+    }
+
+    syncLocalMediaProgressForUser {
+      val savedSessions = DeviceManager.dbManager.getPlaybackSessions().filter { it.serverConnectionConfigId == DeviceManager.serverConnectionConfigId }
+
+      if (savedSessions.isNotEmpty()) {
+        sendSyncLocalSessions(savedSessions) { success, errorMsg ->
+          if (!success) {
+            onSyncFinished(errorMsg ?: "Failed to sync local sessions")
+          } else {
+            AbsLogger.info("ApiHandler", "syncLocalSessionsWithServer: Finished sending local playback sessions to server. Removing ${savedSessions.size} saved sessions.")
+            // Remove all local sessions
+            savedSessions.forEach {
+              DeviceManager.dbManager.removePlaybackSession(it.id)
+            }
+            onSyncFinished(null)
+          }
+        }
+      } else {
+        AbsLogger.info("ApiHandler", "syncLocalSessionsWithServer: No saved local playback sessions to send to server.")
+        onSyncFinished(null)
+      }
+    }
+  }
+
   fun syncLocalMediaProgressForUser(cb: () -> Unit) {
     AbsLogger.info("ApiHandler", "[ApiHandler] syncLocalMediaProgressForUser: Server connection ${DeviceManager.serverConnectionConfigName}")
 
@@ -842,6 +900,18 @@ class ApiHandler(var ctx:Context) {
                 MediaEventManager.syncEvent(mediaProgress, "Sync on server connection")
               }
               DeviceManager.dbManager.saveLocalMediaProgress(localMediaProgress)
+              numLocalMediaProgressUpdated++
+            } else if (localMediaProgress.lastUpdate > mediaProgress.lastUpdate && (localMediaProgress.currentTime != mediaProgress.currentTime || localMediaProgress.isFinished != mediaProgress.isFinished)) {
+              // Local audio progress is more recent so send it to the server, keeping the local timestamp
+              AbsLogger.info("ApiHandler", "syncLocalMediaProgressForUser: Local progress for item \"${mediaProgress.mediaItemId}\" is more recent than server (local lastUpdate=${localMediaProgress.lastUpdate}, server lastUpdate=${mediaProgress.lastUpdate}). Updating server currentTime from ${mediaProgress.currentTime} to ${localMediaProgress.currentTime}, isFinished from ${mediaProgress.isFinished} to ${localMediaProgress.isFinished}")
+              val updatePayload = JSObject()
+              updatePayload.put("currentTime", localMediaProgress.currentTime)
+              updatePayload.put("progress", localMediaProgress.progress)
+              updatePayload.put("isFinished", localMediaProgress.isFinished)
+              updatePayload.put("lastUpdate", localMediaProgress.lastUpdate)
+              updateMediaProgress(localMediaProgress.libraryItemId ?: "", localMediaProgress.episodeId, updatePayload) {
+                AbsLogger.info("ApiHandler", "syncLocalMediaProgressForUser: Updated server progress for item \"${mediaProgress.mediaItemId}\" from local progress")
+              }
               numLocalMediaProgressUpdated++
             } else if (localMediaProgress.lastUpdate > mediaProgress.lastUpdate && localMediaProgress.ebookLocation != null && localMediaProgress.ebookLocation != mediaProgress.ebookLocation) {
               // Patch ebook progress to server

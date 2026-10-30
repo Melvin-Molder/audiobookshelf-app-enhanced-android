@@ -283,29 +283,10 @@ class AbsDatabase : Plugin() {
 
   @PluginMethod
   fun syncLocalSessionsWithServer(call:PluginCall) {
-    if (DeviceManager.serverConnectionConfig == null) {
-      AbsLogger.error("AbsDatabase", "syncLocalSessionsWithServer: not connected to server")
-      return call.resolve()
-    }
-
-    apiHandler.syncLocalMediaProgressForUser {
-      val savedSessions = DeviceManager.dbManager.getPlaybackSessions().filter { it.serverConnectionConfigId == DeviceManager.serverConnectionConfigId }
-
-      if (savedSessions.isNotEmpty()) {
-        apiHandler.sendSyncLocalSessions(savedSessions) { success, errorMsg ->
-          if (!success) {
-            call.resolve(JSObject("{\"error\":\"$errorMsg\"}"))
-          } else {
-            AbsLogger.info("AbsDatabase", "syncLocalSessionsWithServer: Finished sending local playback sessions to server. Removing ${savedSessions.size} saved sessions.")
-            // Remove all local sessions
-            savedSessions.forEach {
-              DeviceManager.dbManager.removePlaybackSession(it.id)
-            }
-            call.resolve()
-          }
-        }
+    apiHandler.syncLocalSessionsWithServer { errorMsg ->
+      if (errorMsg != null) {
+        call.resolve(JSObject().apply { put("error", errorMsg) })
       } else {
-        AbsLogger.info("AbsDatabase", "syncLocalSessionsWithServer: No saved local playback sessions to send to server.")
         call.resolve()
       }
     }

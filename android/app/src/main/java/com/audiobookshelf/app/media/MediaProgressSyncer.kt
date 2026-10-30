@@ -154,7 +154,8 @@ class MediaProgressSyncer(
 
     val currentTime = playerNotificationService.getCurrentTimeSeconds()
     if (currentTime > 0) { // Current time should always be > 0 on pause
-      sync(true, currentTime) { syncResult ->
+      // Always attempt a server sync on pause, even right after a periodic sync
+      sync(true, currentTime, force = true) { syncResult ->
         lastSyncTime = 0L
         Log.d(tag, "pause: Set last sync time 0 $lastSyncTime")
         failedSyncs = 0
@@ -223,14 +224,17 @@ class MediaProgressSyncer(
     }
   }
 
-  fun sync(shouldSyncServer: Boolean, currentTime: Double, cb: (SyncResult?) -> Unit) {
+  /**
+   * @param force sync even if the last sync was less than 1s ago (adds no listening time)
+   */
+  fun sync(shouldSyncServer: Boolean, currentTime: Double, force: Boolean = false, cb: (SyncResult?) -> Unit) {
     if (lastSyncTime <= 0) {
       Log.e(tag, "Last sync time is not set $lastSyncTime")
       return cb(null)
     }
 
     val diffSinceLastSync = System.currentTimeMillis() - lastSyncTime
-    if (diffSinceLastSync < 1000L) {
+    if (diffSinceLastSync < 1000L && !force) {
       return cb(null)
     }
     val listeningTimeToAdd = diffSinceLastSync / 1000L

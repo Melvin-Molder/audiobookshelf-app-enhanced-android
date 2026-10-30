@@ -815,6 +815,11 @@ class MediaManager(private var apiHandler: ApiHandler, var ctx: Context) {
             DeviceManager.serverConnectionConfig?.let {
               serverUserMediaProgress = authorize(it)
             }
+
+            // Android Auto can start the app without the webview, so sync with the server here too
+            apiHandler.syncLocalSessionsWithServer { errorMsg ->
+              Log.d(tag, "checkSetValidServerConnectionConfig: Synced with server${errorMsg?.let { " (error: $it)" } ?: ""}")
+            }
           }
         }
 
