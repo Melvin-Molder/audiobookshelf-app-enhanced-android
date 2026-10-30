@@ -136,6 +136,11 @@ class PlayerNotificationService : MediaBrowserServiceCompat() {
   private var queueCoverBitmap: Pair<String, Bitmap>? = null
 
   private var isAndroidAuto = false
+  // Restoring the last played book when Android Auto starts without a playback session
+  private var hasRestoredLastPlayedBook = false
+  private var isRestoringLastPlayedBook = false
+  private var restoreLastPlayedBookPlayWhenReady = false
+  private var restoringLastPlayedBookSessionId: String? = null
 
   // The following are used for the shake detection
   private var isShakeSensorRegistered: Boolean = false
@@ -538,9 +543,18 @@ class PlayerNotificationService : MediaBrowserServiceCompat() {
 
   private fun preparePlayerWithCurrentProgress(
           playbackSession: PlaybackSession,
-          playWhenReady: Boolean,
+          requestedPlayWhenReady: Boolean,
           playbackRate: Float?
   ) {
+    var playWhenReady = requestedPlayWhenReady
+    if (isRestoringLastPlayedBook) {
+      // Play requested while the last played book was restoring
+      if (playbackSession.id == restoringLastPlayedBookSessionId) {
+        playWhenReady = playWhenReady || restoreLastPlayedBookPlayWhenReady
+      }
+      isRestoringLastPlayedBook = false
+    }
+
     if (!isStarted) {
       Log.i(tag, "preparePlayer: foreground service not started - Starting service --")
       Intent(ctx, PlayerNotificationService::class.java).also { intent ->
@@ -1117,6 +1131,71 @@ class PlayerNotificationService : MediaBrowserServiceCompat() {
       }
     }
     return false
+  }
+
+  /**
+   * Prepares the last played book when there is no playback session, e.g. when Android Auto starts.
+   * Playback only starts when [playWhenReady]: Android Auto sends play on startup only when its
+   * "Start media automatically" setting is on. A play request while restoring starts the restored
+   * book once it is prepared.
+   *
+   * @return true if the last played book is being restored
+   */
+  fun restoreLastPlayedBook(playWhenReady: Boolean): Boolean {
+    if (isRestoringLastPlayedBook) {
+      restoreLastPlayedBookPlayWhenReady = restoreLastPlayedBookPlayWhenReady || playWhenReady
+      return true
+    }
+    // Restore once per service so a book the user closed is not reopened
+    if (hasRestoredLastPlayedBook || currentPlaybackSession != null) return false
+
+    val lastSession = DeviceManager.deviceData.lastPlaybackSession ?: return false
+    if (lastSession.mediaType != "book") return false
+
+    val onPlaybackSession: (PlaybackSession?) -> Unit = { playbackSession ->
+      Handler(Looper.getMainLooper()).post {
+        // Skip when something else started playing while restoring
+        if (playbackSession != null && isRestoringLastPlayedBook && currentPlaybackSession == null) {
+          Log.d(tag, "restoreLastPlayedBook: Restoring ${playbackSession.displayTitle}")
+          // Still restoring until prepared, which uses the latest play request
+          restoringLastPlayedBookSessionId = playbackSession.id
+          preparePlayer(playbackSession, restoreLastPlayedBookPlayWhenReady, mediaManager.getSavedPlaybackRate())
+        } else {
+          isRestoringLastPlayedBook = false
+        }
+      }
+    }
+
+    // Prefer the downloaded copy when there is one
+    val localLibraryItem =
+            lastSession.localLibraryItemId.takeIf { it.isNotEmpty() }?.let {
+              DeviceManager.dbManager.getLocalLibraryItem(it)
+            }
+                    ?: lastSession.libraryItemId?.let {
+                      DeviceManager.dbManager.getLocalLibraryItemByLId(it)
+                    }
+    if (localLibraryItem != null && localLibraryItem.hasTracks(ctx, null)) {
+      startRestoringLastPlayedBook(playWhenReady)
+      onPlaybackSession(localLibraryItem.getPlaybackSession(null, getDeviceInfo()))
+      return true
+    }
+
+    val libraryItemId = lastSession.libraryItemId ?: return false
+    if (!DeviceManager.checkConnectivity(ctx) ||
+                    DeviceManager.serverConnectionConfigId != lastSession.serverConnectionConfigId
+    ) {
+      return false
+    }
+    startRestoringLastPlayedBook(playWhenReady)
+    apiHandler.playLibraryItem(libraryItemId, lastSession.episodeId, getPlayItemRequestPayload(false), onPlaybackSession)
+    return true
+  }
+
+  private fun startRestoringLastPlayedBook(playWhenReady: Boolean) {
+    hasRestoredLastPlayedBook = true
+    isRestoringLastPlayedBook = true
+    restoreLastPlayedBookPlayWhenReady = playWhenReady
+    restoringLastPlayedBookSessionId = null
   }
 
   fun play() {
@@ -1709,6 +1788,7 @@ class PlayerNotificationService : MediaBrowserServiceCompat() {
                           mediaManager.allLibraryPersonalizationsDone
                   )
           onBrowseTreeInitialized()
+          restoreLastPlayedBook(false)
           val children =
                   browseTree[parentMediaId]?.map { item ->
                     Log.d(tag, "Found top menu item: ${item.description.title}")
@@ -1744,6 +1824,7 @@ class PlayerNotificationService : MediaBrowserServiceCompat() {
                         mediaManager.allLibraryPersonalizationsDone
                 )
         onBrowseTreeInitialized()
+        restoreLastPlayedBook(false)
         val children =
                 browseTree[parentMediaId]?.map { item ->
                   Log.d(tag, "Found top menu item: ${item.description.title}")
