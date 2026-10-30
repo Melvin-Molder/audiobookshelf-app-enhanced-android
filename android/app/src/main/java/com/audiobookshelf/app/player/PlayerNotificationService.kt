@@ -483,6 +483,21 @@ class PlayerNotificationService : MediaBrowserServiceCompat() {
           playWhenReady: Boolean,
           playbackRate: Float?
   ) {
+    // The progress syncer keeps the previous session (also while paused) and the player listener
+    // prefers it, so stop it first or the new item's progress is synced to the previous session.
+    val syncerSessionId = mediaProgressSyncer.currentPlaybackSession?.id
+    if (syncerSessionId != null && syncerSessionId != playbackSession.id) {
+      Log.d(tag, "preparePlayer: Stopping progress syncer for previous session $syncerSessionId")
+      mediaProgressSyncer.stop {
+        // Lets the player listener start the syncer for the new session once it plays
+        PlayerListener.lazyIsPlaying = false
+        Handler(Looper.getMainLooper()).post {
+          preparePlayer(playbackSession, playWhenReady, playbackRate)
+        }
+      }
+      return
+    }
+
     if (!playbackSession.isLocal || !DeviceManager.checkConnectivity(ctx)) {
       preparePlayerWithCurrentProgress(playbackSession, playWhenReady, playbackRate)
       return
