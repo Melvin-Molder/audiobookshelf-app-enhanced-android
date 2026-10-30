@@ -35,7 +35,6 @@ class MediaSessionCallback(var playerNotificationService:PlayerNotificationServi
 
   override fun onPlay() {
     Log.d(tag, "ON PLAY MEDIA SESSION COMPAT")
-    if (playerNotificationService.shouldSuppressMediaSessionPlay()) return
     playerNotificationService.play()
   }
 
