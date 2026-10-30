@@ -61,6 +61,7 @@ const val SLEEP_TIMER_WAKE_UP_EXPIRATION = 120000L // 2m
 const val PLAYER_CAST = "cast-player"
 const val PLAYER_EXO = "exo-player"
 const val PREVIOUS_CHAPTER_THRESHOLD_MS = 4000L // Within this time of chapter start, skip previous goes to prior chapter
+const val CHAPTER_PROGRESS_MAX_CHECK_MS = 1000L // Longest wait between checks for the current chapter changing while playing
 
 class PlayerNotificationService : MediaBrowserServiceCompat() {
 
@@ -121,12 +122,14 @@ class PlayerNotificationService : MediaBrowserServiceCompat() {
   private val metadataScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
   private var metadataArtJob: Job? = null
   private val chapterProgressHandler = Handler(Looper.getMainLooper())
-  private val chapterProgressRefresh = Runnable { refreshChapterProgress() }
+  private val chapterProgressRefresh = Runnable { checkChapterChanged() }
   private var useChapterTrack = false
   // Book offered by the Android Auto "Next Book" action: next in a playlist, else next in series
   private var nextBook: LibraryItem? = null
   // Chapter index the published queue starts at (-1 when no queue is published)
   private var queueStartChapterIndex = -1
+  // Chapter index published by the last refreshChapterProgress (-1 when none)
+  private var refreshedChapterIndex = -1
 
   private var isAndroidAuto = false
 
@@ -426,15 +429,44 @@ class PlayerNotificationService : MediaBrowserServiceCompat() {
     mediaSessionConnector.invalidateMediaSessionMetadata()
 
     // Book chapter (not media session chapter) so the queue follows the current chapter
-    val chapter = getCurrentBookChapter() ?: return
-    if (currentPlaybackSession?.chapters?.indexOf(chapter) != queueStartChapterIndex) {
+    val chapter = getCurrentBookChapter()
+    refreshedChapterIndex = getChapterIndex(chapter)
+    if (chapter != null && refreshedChapterIndex != queueStartChapterIndex) {
       publishChapterQueue()
     }
-    if (!currentPlayer.isPlaying) return
-    val delayMs = ((chapter.endMs - getCurrentTime()) / currentPlayer.playbackParameters.speed)
-      .toLong()
-      .coerceAtLeast(1L)
-    chapterProgressHandler.postDelayed(chapterProgressRefresh, delayMs)
+    scheduleChapterChangedCheck(chapter)
+  }
+
+  private fun getChapterIndex(chapter: BookChapter?): Int {
+    if (chapter == null) return -1
+    return currentPlaybackSession?.chapters?.indexOf(chapter) ?: -1
+  }
+
+  /** Refreshes the media session when the current chapter has changed since the last refresh */
+  private fun checkChapterChanged() {
+    val chapter = getCurrentBookChapter()
+    if (getChapterIndex(chapter) != refreshedChapterIndex) {
+      refreshChapterProgress()
+    } else {
+      scheduleChapterChangedCheck(chapter)
+    }
+  }
+
+  /**
+   * Schedules the next chapter change check for the end of the chapter, checking at least every
+   * CHAPTER_PROGRESS_MAX_CHECK_MS so a missed chapter end (e.g. no chapter found at the position
+   * while moving to the next audio track) does not leave the media session showing the old chapter
+   */
+  private fun scheduleChapterChangedCheck(chapter: BookChapter?) {
+    if (currentPlaybackSession?.chapters.isNullOrEmpty() || !currentPlayer.isPlaying) return
+    val untilChapterEndMs =
+            chapter?.let {
+              ((it.endMs - getCurrentTime()) / currentPlayer.playbackParameters.speed).toLong()
+            } ?: CHAPTER_PROGRESS_MAX_CHECK_MS
+    chapterProgressHandler.postDelayed(
+            chapterProgressRefresh,
+            untilChapterEndMs.coerceIn(1L, CHAPTER_PROGRESS_MAX_CHECK_MS)
+    )
   }
 
   /*
