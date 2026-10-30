@@ -26,7 +26,7 @@ class MediaSessionCallback(var playerNotificationService:PlayerNotificationServi
         } else {
           val playbackRate = playerNotificationService.mediaManager.getSavedPlaybackRate()
           Handler(Looper.getMainLooper()).post {
-            playerNotificationService.preparePlayer(it, false, playbackRate)
+            playerNotificationService.preparePlayer(it,true, playbackRate)
           }
         }
       }
