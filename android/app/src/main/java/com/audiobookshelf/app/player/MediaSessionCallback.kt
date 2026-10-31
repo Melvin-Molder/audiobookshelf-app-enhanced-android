@@ -19,6 +19,9 @@ class MediaSessionCallback(var playerNotificationService:PlayerNotificationServi
 
   override fun onPrepare() {
     Log.d(tag, "ON PREPARE MEDIA SESSION COMPAT")
+    if (playerNotificationService.currentPlaybackSession != null) return
+    // Prepare only: Android Auto follows with play when its "Start media automatically" setting is on
+    if (playerNotificationService.restoreLastPlayedBook(false)) return
     playerNotificationService.mediaManager.getFirstItem()?.let { li ->
       playerNotificationService.mediaManager.play(li, null, playerNotificationService.getPlayItemRequestPayload(false)) {
         if (it == null) {
@@ -35,7 +38,9 @@ class MediaSessionCallback(var playerNotificationService:PlayerNotificationServi
 
   override fun onPlay() {
     Log.d(tag, "ON PLAY MEDIA SESSION COMPAT")
-    if (playerNotificationService.shouldSuppressMediaSessionPlay()) return
+    // Without a playback session (e.g. Android Auto starting media automatically) play the last played book
+    if (playerNotificationService.currentPlaybackSession == null &&
+            playerNotificationService.restoreLastPlayedBook(true)) return
     playerNotificationService.play()
   }
 
